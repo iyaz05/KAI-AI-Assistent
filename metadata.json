@@ -1,0 +1,8 @@
+{
+  "name": "OmniVoice AI Assistant",
+  "description": "A comprehensive AI assistant featuring Real-time Live Audio conversation, Search Grounding, Fast Chat, Audio Transcription, and Text-to-Speech generation using Gemini 2.5 models.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
