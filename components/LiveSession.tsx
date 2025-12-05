@@ -1,11 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { getGeminiClient, generateTextResponse } from '../services/geminiService';
+import { getGeminiClient, generateTextResponse, generateSpeech } from '../services/geminiService';
 import { createPcmBlob, decodeBase64, decodeAudioData, blobToBase64 } from '../utils/audioUtils';
 import { LiveServerMessage, Modality, FunctionDeclaration, Type } from '@google/genai';
 import { AppMode, ChatModelType, LogEntry } from '../types';
 
 interface LiveSessionProps {
-  onSetReminder?: (message: string, delaySeconds: number) => void;
   onChangeTab?: (mode: AppMode) => void;
   onLog: (entry: LogEntry) => void;
 }
@@ -24,7 +23,7 @@ type WidgetData =
   | { type: 'map', data: { location: string, lat: number, lng: number } }
   | { type: 'note', data: { title: string, content: string } };
 
-const LiveSession: React.FC<LiveSessionProps> = ({ onSetReminder, onChangeTab, onLog }) => {
+const LiveSession: React.FC<LiveSessionProps> = ({ onChangeTab, onLog }) => {
   const [isActive, setIsActive] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [status, setStatus] = useState<string>("SYSTEM STANDBY");
@@ -46,6 +45,10 @@ const LiveSession: React.FC<LiveSessionProps> = ({ onSetReminder, onChangeTab, o
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   
+  // Ambient Sound Refs
+  const ambienceOscRef = useRef<OscillatorNode[]>([]);
+  const ambienceGainRef = useRef<GainNode | null>(null);
+  
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
@@ -54,6 +57,27 @@ const LiveSession: React.FC<LiveSessionProps> = ({ onSetReminder, onChangeTab, o
   const addLog = (message: string, type: 'info' | 'tool' | 'error' | 'thought' = 'info') => {
     const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
     onLog({ time, message, type });
+  };
+
+  const scheduleReminder = (message: string, delaySeconds: number) => {
+    addLog(`Reminder Set: "${message}" in ${delaySeconds}s`, 'info');
+    
+    setTimeout(async () => {
+      try {
+        addLog(`Playing Reminder: "${message}"`, 'info');
+        const base64Audio = await generateSpeech(`Reminder: ${message}`);
+        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        const audioBuffer = await decodeAudioData(decodeBase64(base64Audio), ctx, 24000, 1);
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        source.start();
+        source.onended = () => { setTimeout(() => ctx.close(), 1000); };
+      } catch (error) {
+        console.error("Failed to play reminder:", error);
+        addLog("Failed to play reminder audio", "error");
+      }
+    }, delaySeconds * 1000);
   };
 
   const renderWidgetTool: FunctionDeclaration = {
@@ -161,7 +185,64 @@ const LiveSession: React.FC<LiveSessionProps> = ({ onSetReminder, onChangeTab, o
     }
   };
 
+  // --- Ambient Sound Logic ---
+  const startAmbience = (ctx: AudioContext) => {
+    try {
+      const mainGain = ctx.createGain();
+      mainGain.gain.setValueAtTime(0, ctx.currentTime);
+      mainGain.gain.linearRampToValueAtTime(0.02, ctx.currentTime + 2); // Soft fade in, low volume
+      mainGain.connect(ctx.destination);
+      ambienceGainRef.current = mainGain;
+
+      // Oscillator 1: Low frequency drone (55Hz)
+      const osc1 = ctx.createOscillator();
+      osc1.type = 'sine';
+      osc1.frequency.value = 55;
+      osc1.connect(mainGain);
+      osc1.start();
+
+      // Oscillator 2: Slightly detuned drone (57Hz) for binaural beat/pulsing
+      const osc2 = ctx.createOscillator();
+      osc2.type = 'sine';
+      osc2.frequency.value = 57;
+      osc2.connect(mainGain);
+      osc2.start();
+
+      // Oscillator 3: Very high frequency shimmer (quiet)
+      const osc3 = ctx.createOscillator();
+      osc3.type = 'triangle';
+      osc3.frequency.value = 2000;
+      const osc3Gain = ctx.createGain();
+      osc3Gain.gain.value = 0.05; // very quiet
+      osc3.connect(osc3Gain);
+      osc3Gain.connect(mainGain);
+      osc3.start();
+
+      ambienceOscRef.current = [osc1, osc2, osc3];
+    } catch (e) {
+      console.error("Failed to start ambience", e);
+    }
+  };
+
+  const stopAmbience = () => {
+    if (ambienceGainRef.current && outputContextRef.current) {
+        const ctx = outputContextRef.current;
+        // Fade out
+        try {
+          ambienceGainRef.current.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+        } catch (e) {}
+    }
+    ambienceOscRef.current.forEach(osc => {
+        try {
+            osc.stop(outputContextRef.current ? outputContextRef.current.currentTime + 0.5 : 0);
+        } catch (e) {}
+    });
+    ambienceOscRef.current = [];
+    ambienceGainRef.current = null;
+  };
+
   const cleanupAudio = () => {
+    stopAmbience();
     sourcesRef.current.forEach(s => s.stop());
     sourcesRef.current.clear();
     if (scriptProcessorRef.current) {
@@ -301,7 +382,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ onSetReminder, onChangeTab, o
           },
           systemInstruction: `You are Omni, a hyper-intelligent, multimodal AI agent. 
           Your goal is to BE HELPFUL and VISUAL. 
-          You have tools: 'search_web', 'order_food', 'open_app', 'render_widget'.
+          You have tools: 'search_web', 'order_food', 'open_app', 'render_widget', 'set_reminder'.
           Whenever you provide data about weather, stocks, locations, or summaries, you MUST use the 'render_widget' tool.
           Use 'search_web' for any knowledge queries. Do NOT ask user to enable it.
           Be concise, witty, and futuristic.`,
@@ -312,6 +393,9 @@ const LiveSession: React.FC<LiveSessionProps> = ({ onSetReminder, onChangeTab, o
             setStatus("NEURAL LINK ACTIVE");
             addLog("Connection Established", "info");
             
+            // Start Ambient Sound
+            startAmbience(outputCtx);
+
             const source = inputCtx.createMediaStreamSource(stream);
             sourceNodeRef.current = source;
             const processor = inputCtx.createScriptProcessor(2048, 1, 1);
@@ -360,7 +444,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ onSetReminder, onChangeTab, o
                       result = { result: "Widget rendered successfully." };
                   }
                   else if (fc.name === 'set_reminder') {
-                    if (onSetReminder) onSetReminder(fc.args['message'] as string, fc.args['delay_seconds'] as number);
+                    scheduleReminder(fc.args['message'] as string, fc.args['delay_seconds'] as number);
                     result = { result: "Reminder set." };
                   } 
                   else if (fc.name === 'change_tab') {

@@ -3,8 +3,6 @@ import { AppMode, LogEntry } from './types';
 import LiveSession from './components/LiveSession';
 import ChatSession from './components/ChatSession';
 import TerminalSession from './components/TranscribeSession'; 
-import { generateSpeech } from './services/geminiService';
-import { decodeBase64, decodeAudioData } from './utils/audioUtils';
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AppMode>(AppMode.LIVE);
@@ -12,26 +10,6 @@ const App: React.FC = () => {
 
   const handleLog = (entry: LogEntry) => {
     setLogs(prev => [...prev.slice(-99), entry]); 
-  };
-
-  const handleSetReminder = (message: string, delaySeconds: number) => {
-    console.log(`Setting reminder: "${message}" in ${delaySeconds} seconds`);
-    handleLog({ time: new Date().toLocaleTimeString(), message: `Reminder Set: ${message} (${delaySeconds}s)`, type: 'info' });
-    
-    setTimeout(async () => {
-      try {
-        const base64Audio = await generateSpeech(`Reminder: ${message}`);
-        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-        const audioBuffer = await decodeAudioData(decodeBase64(base64Audio), ctx, 24000, 1);
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
-        source.start();
-        source.onended = () => { setTimeout(() => ctx.close(), 1000); };
-      } catch (error) {
-        console.error("Failed to play reminder:", error);
-      }
-    }, delaySeconds * 1000);
   };
 
   const NavButton = ({ mode, icon, label }: { mode: AppMode, icon: React.ReactNode, label: string }) => (
@@ -99,7 +77,7 @@ const App: React.FC = () => {
       {/* Main Content Area */}
       <main className="flex-1 overflow-hidden relative z-10">
         <div className="h-full w-full" style={{ display: activeTab === AppMode.LIVE ? 'block' : 'none' }}>
-            <LiveSession onSetReminder={handleSetReminder} onChangeTab={setActiveTab} onLog={handleLog} />
+            <LiveSession onChangeTab={setActiveTab} onLog={handleLog} />
         </div>
 
         {activeTab === AppMode.CHAT && <ChatSession />}
